@@ -1,0 +1,187 @@
+library(quantstrat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(TTR)
+library(IKTrading)
+
+### 1. Setting up the strategy ###
+
+osFUN_all_eq <- function (data, timestamp, orderqty, ordertype, orderside, equity, portfolio, symbol, ruletype, ..., initEq) {
+  datePos <- format(timestamp,"%Y-%m-%d")
+  
+  updatePortf(Portfolio = portfolio, Symbol = symbol, Dates = paste0(start(data), "/", datePos))
+  
+  trading_pl <- sum(.getPortfolio(portfolio)$summary$Net.Trading.PL)
+  # The total equity in the strategy for this symbol (and this symbol only in isolation always, as this is how quantstrat by default works with applyStrategy)
+  equity <- initeq + trading_pl
+  ClosePrice <- getPrice(data, prefer = "Close")[datePos]
+  UnitSize <- as.numeric(trunc(equity / ClosePrice))
+  UnitSize <- osMaxPos(data, timestamp, UnitSize, ordertype, orderside, portfolio, symbol, ruletype, digits=0)
+  UnitSize
+}
+
+
+# 1A. Setting timezone and currency and stock
+
+format
+
+Sys.setenv(TZ = "UTC")
+currency("USD")
+stock("SPY", currency = "USD", multiplier = 1)
+
+# 1B. You need to set-up a period, which is defined by 3 main variables
+
+initdate <- "2019-01-01" # Date when you initialise the account, port and strategy
+from <- initdate
+to <- "2019-12-31"
+
+#1C. tradesize and initial equity
+tradesize <- 10000
+initeq <- 100000
+
+.fast = 10
+.slow = 30
+
+.FastSMA = (1:10)
+.SlowSMA = (11:20)
+
+# 1D. Getting symbols
+
+getSymbols(Symbols = "SPY", 
+           src = "yahoo", 
+           from = from, 
+           to = to, index.class=c("POSIXt","POSIXct"))
+
+max_qty_traded <- initeq
+addPosLimit(strategy.st, "EL.PA", timestamp = initdate, maxpos = max_qty_traded)
+
+# 1E. Naming the Account, Portfolio and Strategy
+
+strategy.st <- portfolio.st <- account.st <- "firststrat"
+
+rm.strat(portfolio.st)
+rm.strat(account.st)
+
+# 1F. Initialising the Account, Portfolio, Strategy and Orders
+
+
+initPortf(name = portfolio.st, 
+          symbols = "SPY",
+          initDate = initdate,
+          currency = "USD")
+
+initAcct(account.st, 
+         portfolios = portfolio.st,
+         initDate = initdate, 
+         initEq = initeq,
+         currency = "USD")
+
+initOrders(portfolio = portfolio.st,
+           Symbols = "SPY",
+           initDate = initdate)
+
+strategy(strategy.st,
+         store = TRUE)
+
+# Specify the max quantity you could hold in the SPY instrument.  Here we simply assume 1e5 units. You could reduce this number to limit the exposure
+
+max_qty_traded <- initeq
+addPosLimit(strategy.st, "SPY", timestamp = initdate, maxpos = max_qty_traded)
+
+#### 2. Setting up an indicator ####
+
+add.indicator(strategy.st,
+              name = "SMA",
+              arguments = list(x = quote(Cl(mktdata)),
+                               n = fast),
+              label = "Fast")
+
+add.indicator(strategy.st,
+              name = "SMA",
+              arguments = list(x = quote(Cl(mktdata)),
+                               n = slow),
+              label = "Slow")
+
+#### 3. Setting up signals ####
+
+#Basically, when the fast MA crosses the slow, you go long
+add.signal(strategy = strategy.st,
+           name="sigCrossover",
+           arguments = list(columns = c("Fast", "Slow"),
+                            relationship = "gt"),
+           label = "golong")
+
+add.signal(strategy = strategy.st,
+           name = "sigCrossover",
+           arguments = list(columns = c("Fast", "Slow"),
+                            relationship = "lt"),
+           label = "goexit")
+
+
+#### 4. Adding rules ####         QUI MI SA CHE HO FATTO BORDELLO CON osFUN = osdollarMAX
+#open
+add.rule(strategy.st, name='ruleSignal', 
+         arguments = list(sigcol="golong", 
+                          sigval=TRUE, 
+                          orderqty=tradesize, 
+                          ordertype='market', 
+                          orderside='long', 
+                          tradeSize = tradesize, 
+                          maxSize = tradesize,
+                          replace=FALSE, 
+                          osFUN = osFUN_all_eq ), 
+         type='enter', path.dep=TRUE)
+
+
+add.rule(strategy.st, 
+         name = 'ruleSignal',
+         arguments = list(sigcol = "goexit", 
+                          sigval = TRUE, 
+                          orderqty = 'all',
+                          ordertype = 'market', 
+                          orderside = 'long',
+                          replace=FALSE),
+         type = "exit")
+
+
+#### 5. Running the strategy ####
+
+#5. Adding distribution  --------------------------------------------------   
+
+add.distribution(strategy.st,
+                 paramset.label ="SMA",
+                 component.type = "indicator",
+                 component.label = "Fast",
+                 variable = list(n = .FastSMA),
+                 label = "nFast")
+
+add.distribution(strategy.st,
+                 paramset.label = "SMA",
+                 component.type = "indicator",
+                 component.label = "Slow",
+                 variable = list(n = .SlowSMA),
+                 label = "nSlow")
+
+add.distribution.constraint(strategy.st,
+                            paramset.label = "SMA",
+                            distribution.label.1 = "nFast",
+                            distribution.label.2 = "nSlow",
+                            operator = "<",
+                            label = "SMA")
+
+
+# 6. Running the strategy --------------------------------------------------
+
+# Use applyStrategy() to apply your strategy. Save this to out
+results <- apply.paramset(strategy.st, paramset.label = "SMA", portfolio.st = portfolio.st, account.st = account.st)
+
+updatePortf(strategy.st)
+updateAcct(strategy.st)
+updateEndEq(strategy.st) 
+
+tS <- results$tradeStats
+idx <- order(tS[,1],tS[,2])
+tS <- tS[idx,]
+
+write.csv(tS,"/Users/alessandro/Desktop/Scraping/SPYNUOVO.csv")
