@@ -1,0 +1,206 @@
+library(quantstrat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(TTR)
+library(IKTrading)
+
+### 1. Setting up the strategy ###
+osFUN_all_eq <- function (data, timestamp, orderqty, ordertype, orderside, equity, portfolio, symbol, ruletype, ..., initEq) {
+  datePos <- format(timestamp,"%Y-%m-%d %H:%M:%S")
+  
+  updatePortf(Portfolio = portfolio, Symbol = symbol, Dates = paste0(start(data), "/", datePos))
+  
+  trading_pl <- sum(.getPortfolio(portfolio)$summary$Net.Trading.PL)
+  # The total equity in the strategy for this symbol (and this symbol only in isolation always, as this is how quantstrat by default works with applyStrategy)
+  equity <- initeq + trading_pl
+  pos <- getPosQty(portfolio, symbol, timestamp) 
+  if(pos != 0) {
+    return(0)
+  }
+  ClosePrice <- getPrice(data, prefer = "Close")[datePos]
+  UnitSize <- as.numeric(trunc(equity / ClosePrice))
+  UnitSize <- osMaxPos(data, timestamp, UnitSize, ordertype, orderside, portfolio, symbol, ruletype, digits=0)
+  UnitSize
+}
+
+NASD_xts <- xts(nasdaq30min[,-1],
+                order.by = as.POSIXct(nasdaq30min$Time, format = "%Y-%m-%d %H:%M:%S"))
+
+# 1A. Setting timezone and currency and stock
+
+format
+
+Sys.setenv(TZ = "UTC")
+currency("USD")
+
+
+# 1B. You need to set-up a period, which is defined by 3 main variables
+
+initdate <- "2021-01-04 09:30:00" # Date when you initialise the account, port and strategy
+from <- initdate
+to <- "2021-03-15 10:00:00"
+
+
+#1C. tradesize and initial equity
+tradesize <- 1000
+initeq <- 1000
+nRSI = 10
+stoploss = 5
+
+
+RSIhigh = 80
+RSIlow = 20
+
+sd = 1.5
+nBB = 10
+
+# 1D. Getting symbols
+
+
+
+
+
+
+# 1E. Naming the Account, Portfolio and Strategy
+
+strategy.st <- portfolio.st <- account.st <- "firststrat"
+
+rm.strat(portfolio.st)
+rm.strat(account.st)
+
+# 1F. Initialising the Account, Portfolio, Strategy and Orders
+
+
+initPortf(name = portfolio.st, 
+          symbols = "NASD_xts",
+          initDate = initdate,
+          currency = "USD")
+
+initAcct(account.st, 
+         portfolios = portfolio.st,
+         initDate = initdate, 
+         initEq = initeq,
+         currency = "USD")
+
+initOrders(portfolio = portfolio.st,
+           Symbols = "NASD_xts",
+           initDate = initdate)
+strategy(strategy.st,
+         store = TRUE)
+# Specify the max quantity you could hold in the NASD_xts instrument.  Here we simply assume 1e5 units. You could reduce this number to limit the exposure
+
+max_qty_traded <- 100
+addPosLimit(strategy.st, "NASD_xts", timestamp = initdate, maxpos = max_qty_traded)
+
+#### 2. Setting up an indicator ####
+
+add.indicator(strategy = strategy.st,
+              name = "BBands",
+              arguments = list(HLC = quote(HLC(mktdata)),
+                               n = nBB, sd = sd, maType = "SMA", "RBBands"),
+              label = "BBands")
+
+add.indicator(strategy = strategy.st,
+              name = "RSI",
+              arguments = list(price = quote(Cl(mktdata)), n = nRSI,
+                               maType = "WMA"),
+              label = "rsi")
+
+applyIndicators(strategy = strategy.st, mktdata=OHLC(NASD_xts))
+colnames(mktdata) <- c("NASD_xts.Open","NASD_xts.High","NASD_xts.
+Low","NASD_xts.Close","dn.BBands","mavg.BBands","up.BBands","pctB.BBands","rsi")
+
+#puoi aggiungere un nuovo indicatore e usare sigCrossover al posto di sigFormmula
+
+
+
+#### 3. Setting up signals ####
+
+
+add.signal(strategy = strategy.st,
+           name="sigFormula",
+           arguments = list(label = "Cl.gt.UpperBB.RSI",
+                            data = mktdata,
+                            formula = "(NASD_xts.Close >= up.BBands & rsi >= RSIhigh)",
+                            cross = FALSE),
+           label = "Cl.gt.UpperBB.RSI")
+
+add.signal(strategy = strategy.st,
+           name="sigFormula",
+           arguments = list(label = "Cl.lt.LowerBB.RSI",
+                            data = mktdata,
+                            formula = "(NASD_xts.Close <= dn.BBands & rsi <= RSIlow)",
+                            cross = FALSE),
+           label = "Cl.lt.LowerBB.RSI")
+
+applySignals(strategy = strategy.st,  mktdata)
+
+#### 4. Adding rules ####        
+#open
+add.rule(strategy.st, name='ruleSignal', 
+         arguments = list(sigcol="Cl.lt.LowerBB.RSI", 
+                          sigval=TRUE, 
+                          orderqty=tradesize, 
+                          ordertype='market', 
+                          orderside='long', 
+                          tradeSize = tradesize, 
+                          maxSize = tradesize,
+                          replace=FALSE, 
+                          osFUN = osFUN_all_eq ), 
+         type='enter', path.dep=TRUE, label = "golong")
+
+
+add.rule(strategy.st, 
+         name = 'ruleSignal',
+         arguments = list(sigcol = "Cl.gt.UpperBB.RSI", 
+                          sigval = TRUE, 
+                          orderqty = 'all',
+                          ordertype = 'market', 
+                          orderside = 'long',
+                          replace=FALSE),
+         type = "exit")
+
+# Now for setting a stop-loss
+add.rule(strategy = strategy.st, name = "ruleSignal",
+         arguments = list(sigcol = "Cl.lt.LowerBB.RSI",
+                          sigval = TRUE,
+                          orderside = "long",
+                          replace = FALSE,
+                          # Now we set up a stop-limit order
+                          ordertype = "stoplimit",  # Order type is stop-limit
+                        #osFUN = osMaxPos,  # Clear ALL stocks
+                          orderqty = "all",  # Clear all stocks
+                          threshold = stoploss),  # With tmult set to TRUE, we are
+                         tmult = TRUE,  # Forces threshold to be a percent multiplier of the price
+         # saying, in effect, that if the price drops below 1% of what it was when we opened the position
+         # then sell all stocks to close the position
+         type = "chain", parent = "golong", label = "stop_loss")
+
+
+#### 5. Running the strategy ####
+
+# Use applyStrategy() to apply your strategy. Save this to out
+out <- applyStrategy(strategy = strategy.st, portfolios = portfolio.st)
+
+# Update your portfolio (portfolio.st)
+updatePortf(portfolio.st)
+daterange <- time(getPortfolio(portfolio.st)$summary)[-1]
+
+# Update your account (account.st)
+updateAcct(account.st, daterange)
+updateEndEq(account.st)
+
+
+# Get the tradeStats for your portfolio
+tstats <- tradeStats(Portfolio = portfolio.st)
+
+tstats 
+
+#chart.Posn(Portfolio = portfolio.st, Symbol = "NASD_xts")
+#plot(add_BBands(sd = sd, n = nBB))
+#plot(add_RSI(n = nRSI))
+
+#zoom_Chart('2014-01::2014-12')
+
+#table.CalendarReturns(tstats)
